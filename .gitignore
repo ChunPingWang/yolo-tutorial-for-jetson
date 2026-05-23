@@ -1,0 +1,14 @@
+.venv/
+.claude/
+__pycache__/
+*.pyc
+models/*.pt
+models/*.engine
+models/*.onnx
+models/*.cache
+output/
+data/*
+!data/.gitkeep
+
+# ultralytics download stray (cwd download fallback)
+/bus.jpg

@@ -1,0 +1,16 @@
+# ml-vision — Jetson Orin Nano (JetPack 6 / CUDA 12.6 / Python 3.10)
+#
+# 本機 ~/.local 已有 user-level CUDA torch 2.8 + torchvision 0.23 + tensorrt 10.3
+# (由 JetPack 6 + 既有 pip install --user 安裝)，本檔只列要「補裝」的套件。
+# 不要 `pip install torch` — 會抓到 PyPI 的 CPU wheel，覆蓋掉 CUDA 版。
+
+ultralytics>=8.3.0
+opencv-python>=4.10.0
+numpy>=1.26,<2.0
+pillow>=10.0.0
+psutil>=5.9.0
+
+# TensorRT 匯出需要
+onnx
+onnxslim
+onnxruntime
