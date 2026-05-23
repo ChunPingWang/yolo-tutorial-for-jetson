@@ -352,6 +352,20 @@ sudo jetson_clocks   # 鎖最高頻，禁用 DVFS
 
 > yolo11l 的 .pt p99 衝到 181 ms（平均才 88 ms），變異 2×，反映 PyTorch 在 Orin Nano 上跑這 size 已經吃力，可能受到記憶體壓力或熱降頻影響。TRT engine 完全沒這問題（p99 ≈ 平均 × 1.4）。
 
+#### YOLOv11x（56.9M params, 109 MB .pt）— Orin Nano 8GB 上限
+
+| 格式 | 平均延遲 | p99 | FPS | 加速比 | 模型大小 |
+|------|---------|-----|-----|--------|---------|
+| PyTorch .pt (FP32) | 125.3 ms | 130.8 ms | **8.0** | 1.00× | 109 MB |
+| TensorRT .engine (FP16) | 40.9 ms | 50.9 ms | **24.4** | 3.06× | 112 MB |
+| TensorRT .engine (INT8) | 匯出失敗 — workspace ≤ 1 GB 仍記憶體不足 | — | — | — | — |
+
+> **TRT 匯出陷阱**：預設 `--workspace 4` (GB) 在 Orin Nano 8GB 共用記憶體下會直接 fail（GPU 拿不到 4GB 連續空間）。必須降到 `--workspace 2` 才能匯 FP16。即便如此，TRT log 有大量「tactic skipped due to insufficient memory」，TRT 被迫挑次優 kernel，所以這個 engine 可能還沒達到 yolo11x 在 Orin Nano 的最佳速度。
+>
+> **INT8 匯出失敗**：INT8 校準需要額外 GPU 記憶體存每層的活化值統計，workspace 2GB 與 1GB 都不夠用。這代表 **yolo11x INT8 在 Orin Nano 8GB 上實際不可行**，要做就要換 Orin NX 16GB 或 AGX。
+>
+> 匯出時間：**22.5 分鐘**（vs yolo11l 約 10 分鐘），明顯被記憶體壓力拖慢。
+
 **為什麼 FP16 engine 比 .pt 大？** TRT 把模型展開、合併層、加上 metadata，會比原始權重大一點。INT8 因為權重本身變 1/4 又縮回到接近原 .pt 大小。
 
 **精度** (bus.jpg，肉眼判定 5 個物件)：
@@ -369,6 +383,7 @@ sudo jetson_clocks   # 鎖最高頻，禁用 DVFS
 | YOLOv11s | 9.4M | **+7%**  (42→45 FPS) |
 | YOLOv11m | 20.1M | **−2%**（noise 內，打平） |
 | YOLOv11l | 25.3M | **+6%**  (38→40 FPS) ← 反彈 |
+| YOLOv11x | 56.9M | INT8 匯出失敗（記憶體不足） |
 
 可能解釋：
 - **小模型（n/s）**：wall-clock 含較多固定 overhead（Python 包裝、preprocess、NMS），INT8 縮短的 GPU 段時間佔比反而大
@@ -384,7 +399,8 @@ sudo jetson_clocks   # 鎖最高頻，禁用 DVFS
 | YOLOv11n | 1.72× |
 | YOLOv11s | 1.41× |
 | YOLOv11m | 2.30× |
-| YOLOv11l | **3.33×** |
+| YOLOv11l | 3.33× |
+| YOLOv11x | **3.06×** |
 
 yolo11l 的 .pt 跑得非常慘（88 ms 平均、182 ms p99），PyTorch 在 Orin Nano 上跑這 size 已經失去戰力；一進 TRT 就拉回 38 FPS。**結論：模型越大，TRT 加速越值得；但 INT8 加速與 size 的關係是 U 型**。
 
@@ -398,8 +414,11 @@ yolo11l 的 .pt 跑得非常慘（88 ms 平均、182 ms p99），PyTorch 在 Ori
 | s INT8 | 45 | 3.6× |
 | m FP16 | 41 | 7.7× |
 | l INT8 | 40 | 9.7× |
+| x FP16 | 24 | 21.9× |
 
-**模型容量差 10 倍，FPS 只差 20%**。這代表 GPU 已經不是瓶頸，固定成本（NMS、Python wrapper、preprocess）佔了相當比例。如果你想突破 50 FPS 上限，**換更小的模型沒用，要動的是這些固定成本**（例如改用 C++ 推論、整合到 DeepStream pipeline）。
+**模型容量差 22 倍，前四個 FPS 只差 20%**。GPU 在這個區間已經不是瓶頸，固定成本（NMS、Python wrapper、preprocess）佔了相當比例。如果你想突破 50 FPS 上限，**換更小的模型沒用，要動的是這些固定成本**（例如改用 C++ 推論、整合到 DeepStream pipeline）。
+
+不過從 yolo11l → yolo11x 時 FPS 跌了 40%（40 → 24），代表這個 size 真的開始壓到 GPU 算力上限。加上 INT8 匯出失敗，**yolo11x 不適合在 Orin Nano 8GB 上部署**。
 
 ### 怎麼選 size + 精度
 
@@ -445,7 +464,15 @@ pip install --user onnx onnxslim onnxruntime
 ```
 
 ### TRT 匯出超慢（10+ 分鐘）
-**正常**。Auto-tuning 在試上百種 kernel 組合，會記在 cache 裡，下次同條件匯出快很多。INT8 因為要跑校準會再多幾分鐘。
+**正常**。Auto-tuning 在試上百種 kernel 組合，會記在 cache 裡，下次同條件匯出快很多。INT8 因為要跑校準會再多幾分鐘。yolo11x FP16 在 Orin Nano 8GB 上花了 22.5 分鐘（記憶體緊張，TRT 被迫挑次優 tactic）。
+
+### `RuntimeError: TensorRT engine build failed`
+匯出大模型 (yolo11l/x) 時最常見原因是 **GPU workspace 不夠**。Orin Nano 8GB 共用記憶體下，預設 `--workspace 4` (GB) 常拿不到連續空間。解法：
+```bash
+python src/export_tensorrt.py --weights models/yolo11l.pt --workspace 2  # 改 2GB
+python src/export_tensorrt.py --weights models/yolo11l.pt --workspace 1  # 還不行就 1GB
+```
+但 INT8 校準需要額外記憶體，太小的 workspace 還是會 fail。yolo11x INT8 在本機就是這樣 — 屬於硬體上限。匯出前先 `tegrastats` 確認沒有別的進程佔記憶體。
 
 ### 找不到 `/dev/video*`
 USB webcam 沒接 / 沒被識別。`dmesg | tail` 看看插入時有沒有 log。CSI 相機是用 `nvarguscamerasrc` 走 GStreamer，不會出現在 `/dev/video*`。
@@ -482,7 +509,7 @@ YOLOv11 有 n/s/m/l/x 五種尺寸：
 YOLO("yolo11s.pt")  # 9.4M params, ~3.6× yolo11n
 YOLO("yolo11m.pt")  # 20.1M params
 ```
-本機實測 `yolo11s` INT8 跑 45 FPS、`yolo11m` FP16 跑 41 FPS、**`yolo11l` INT8 跑 40 FPS**（見上面效能表）。`yolo11x` 在 Orin Nano 8GB 才會吃力，建議從這個 size 開始考慮換 Orin AGX/NX。
+本機實測：`yolo11s` INT8 跑 45 FPS、`yolo11m` FP16 跑 41 FPS、`yolo11l` INT8 跑 40 FPS、**`yolo11x` FP16 跑 24 FPS（INT8 匯出失敗）**。從 yolo11x 開始 Orin Nano 8GB 明顯吃力，要這個 size 建議換 **Jetson Orin NX 16GB** 或 **AGX Orin 32/64GB**。
 
 注意「**換更大模型不等於更好結果**」 — 看你的瓶頸：
 - 漏偵測（recall 低）→ 換大模型可能改善（模型容量更大）
