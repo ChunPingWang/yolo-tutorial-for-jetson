@@ -334,6 +334,14 @@ sudo jetson_clocks   # 鎖最高頻，禁用 DVFS
 | TensorRT .engine (FP16) | 23.6 ms | 28.6 ms | **42.4** | 1.41× | 21.4 MB |
 | TensorRT .engine (INT8) | 22.1 ms | 23.2 ms | **45.3** | 1.51× | 12.1 MB |
 
+#### YOLOv11m（20.1M params, 38.8 MB .pt）
+
+| 格式 | 平均延遲 | p99 | FPS | 加速比 | 模型大小 |
+|------|---------|-----|-----|--------|---------|
+| PyTorch .pt (FP32) | 55.5 ms | 56.1 ms | **18.0** | 1.00× | 38.8 MB |
+| TensorRT .engine (FP16) | 24.2 ms | 32.3 ms | **41.3** | 2.30× | 42.0 MB |
+| TensorRT .engine (INT8) | 24.6 ms | 35.1 ms | **40.6** | 2.25× | 23.2 MB |
+
 **為什麼 FP16 engine 比 .pt 大？** TRT 把模型展開、合併層、加上 metadata，會比原始權重大一點。INT8 因為權重本身變 1/4 又縮回到接近原 .pt 大小。
 
 **精度** (bus.jpg，肉眼判定 5 個物件)：
@@ -343,20 +351,32 @@ sudo jetson_clocks   # 鎖最高頻，禁用 DVFS
 
 ### 反直覺發現
 
-直覺以為「模型越大、量化加速越多」，**實測剛好相反**：
+直覺以為「模型越大、量化加速越多」，**實測完全相反**，而且是漂亮的單調遞減：
 
-| 模型 | INT8 vs FP16 增益 |
-|------|------------------|
-| YOLOv11n | +13% (48→55 FPS) |
-| YOLOv11s | +7%  (42→45 FPS) |
+| 模型 | params | INT8 vs FP16 增益 |
+|------|--------|------------------|
+| YOLOv11n | 2.6M | **+13%** (48→55 FPS) |
+| YOLOv11s | 9.4M | **+7%**  (42→45 FPS) |
+| YOLOv11m | 20.1M | **−2%**（在 noise 內，等於沒效果） |
 
 可能解釋：
-- yolo11s 比較大，FP16 已經能餵飽 Tensor Core，INT8 主要省的是**記憶體頻寬**而不是算力
-- yolo11n 比較小，FP16 還在 launch-overhead 區間，INT8 縮短的 batch latency 比例反而較高
+- 大模型在 FP16 下**已經餵飽 Tensor Core**，INT8 主要省記憶體頻寬，但這部分早已被 TRT 的層融合處理掉了
+- 小模型的 wall-clock 含較多固定 overhead（Python 包裝、preprocess、NMS），INT8 縮短的 GPU 段時間反而在 wall-clock 上比例變大
+- INT8 本身有 Q/DQ 節點的額外開銷，當 matmul 加速沒拉開時這個 overhead 反咬一口
 
-另一個值得注意的點：**yolo11s INT8（45 FPS）還是輸 yolo11n FP16（48 FPS）** — 追 FPS 不如直接用更小的模型 + FP16。
+但 **.pt → FP16 的加速比剛好相反，越大越明顯**：
 
-不過 yolo11s INT8 的 p99 延遲（23.2 ms）比它的 FP16 版本（28.6 ms）穩定很多 — 量化能降低延遲變異，這在固定 frame budget 的應用（如 30 FPS 視訊串流）很有用。
+| 模型 | .pt → FP16 加速 |
+|------|----------------|
+| YOLOv11n | 1.72× |
+| YOLOv11s | 1.41× |
+| YOLOv11m | **2.30×** |
+
+yolo11m FP32 跑得很慢（55 ms / 18 FPS），因為 PyTorch 沒對它做太多 kernel 優化；一進 TRT 就拉到 41 FPS。換句話說：**模型越大，TRT 越值得，但 INT8 量化越不值得**。
+
+另一個值得注意的點：**yolo11m FP16（41 FPS）≈ yolo11s INT8（45 FPS）≈ yolo11n FP16（48 FPS）** — 在 Orin Nano 上，這三個組合 FPS 接近，但模型容量差到 8 倍。如果你的場景需要偵測小物件或困難場景，**直接上 yolo11m FP16** 是合理的，沒必要為了快幾 FPS 走 INT8。
+
+不過 yolo11s INT8 的 p99 延遲（23.2 ms）比 FP16 版本（28.6 ms）穩很多 — 量化能降低延遲變異，這在固定 frame budget 的應用（如 30 FPS 視訊串流）很有用。yolo11m INT8 反而 p99 比 FP16 還大（35 vs 32），這個 model size 上 INT8 沒帶來穩定性收益。
 
 ### 怎麼選 size + 精度
 
@@ -365,8 +385,9 @@ sudo jetson_clocks   # 鎖最高頻，禁用 DVFS
 | 追極限 FPS（不在乎精度幾%） | **yolo11n INT8**（55 FPS, 5.4 MB） |
 | 精度優先、可接受 30 FPS | **yolo11n FP32 .pt**（28 FPS, 不用 TRT 匯出，最準） |
 | 平衡點，部署首選 | **yolo11n FP16 engine**（48 FPS, 精度幾乎沒掉） |
-| 偵測小物件 / 困難場景 | **yolo11s INT8**（45 FPS, 模型容量更大） |
+| 偵測小物件 / 困難場景 | **yolo11m FP16**（41 FPS, 模型容量 8× nano） |
 | 即時 30 FPS 串流要穩定 | **yolo11s INT8**（p99 23 ms，最不抖） |
+| 想跑 yolo11m 但要省記憶體 | **yolo11m INT8**（23 MB engine, FPS 與 FP16 持平） |
 
 ---
 
@@ -437,7 +458,7 @@ YOLOv11 有 n/s/m/l/x 五種尺寸：
 YOLO("yolo11s.pt")  # 9.4M params, ~3.6× yolo11n
 YOLO("yolo11m.pt")  # 20.1M params
 ```
-本機實測 `yolo11s` INT8 跑 45 FPS（見上面效能表）。`yolo11m` 預估 FP16 約 25-30 FPS，`yolo11l/x` 在 Orin Nano 8GB 會吃力。
+本機實測 `yolo11s` INT8 跑 45 FPS、`yolo11m` FP16 跑 41 FPS（見上面效能表）。`yolo11l/x` 在 Orin Nano 8GB 會吃力，建議跳過。
 
 注意「**換更大模型不等於更好結果**」 — 看你的瓶頸：
 - 漏偵測（recall 低）→ 換大模型可能改善（模型容量更大）
