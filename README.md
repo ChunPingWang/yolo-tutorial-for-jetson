@@ -4,6 +4,8 @@
 
 本專案是一個**邊緣 AI 概念驗證 (PoC)**：在 NVIDIA Jetson Orin Nano 8GB 上跑 YOLOv11，並用 TensorRT 把 PyTorch 模型加速到接近兩倍 FPS。本文除了使用說明，也整理了從硬體、深度學習到推論加速的基礎知識，讓你看完就懂為什麼每一步要這樣做。
 
+> 後續規劃與待相機到位才能跑的實驗整理在 [BACKLOG.md](BACKLOG.md)。
+
 ---
 
 ## 目錄
